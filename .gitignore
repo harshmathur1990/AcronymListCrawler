@@ -1,3 +1,7 @@
 *.pyc
-*.DS_Store
-*.idea*
+*.idea
+*.DS_STORE
+*.out
+*.log
+/logs/*
+dump.rdb

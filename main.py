@@ -1,92 +1,92 @@
-from gevent import monkey
-monkey.patch_all()
 import gevent
-from gevent.wsgi import WSGIServer
-from flask import Flask
-from database import engine
+import json
 from bs4 import BeautifulSoup
 from urllib2 import urlopen, HTTPError, URLError
-from models import urls
+from sqlalchemy import text
+from flask import request, jsonify
+from api import crawl
+from models import CrawlerDB
 import httplib
-app = Flask(__name__)
-url_visited = dict()
 
 
-def get_effective_end_point(end_point):
-    if end_point:
-        end_point = end_point.strip()
-    if not end_point:
-        return None
-    if end_point == '/' or end_point.startswith('javascript') or end_point.startswith('#'):
-        return None
-    return end_point
-
-
-def parent_and_run_child_urls(url, depth, max_depth):
+def add_acronym_for_page(page, category_id):
+    url = u'http://www.acronymslist.com/' + page.attrs['href']
+    opened_url = urlopen(url)
     try:
-        url_visited[url] = True
-        opened_url = urlopen(url)
-        url_insert = urls.insert()\
-            .values(url=url, code=u'200')
-        conn = engine.connect()
-        conn.execute(url_insert)
-        conn.close()
+        page = opened_url.read()
+    except httplib.IncompleteRead, e:
+        page = e.partial
+        print "Point 4"
+    soup = BeautifulSoup(page, 'html.parser')
+    all_acronyms = soup.find_all('a', attrs={'class': 'special'})
+    for acronym in all_acronyms:
+        name = acronym.contents[0]
+        value = acronym.next.next.next
+        db = CrawlerDB()
+        db.begin()
         try:
-            page = opened_url.read()
-        except httplib.IncompleteRead, e:
-            page = e.partial
-        soup = BeautifulSoup(page, 'html.parser')
-        links = soup.find_all('a')
-        threads = list()
-        child_depth = int(depth) + int(1)
-        print child_depth
-        for link in links:
-            if depth <= max_depth and len(url_visited.keys()) < 10000:
-                end_point = link.get('href')
-                effective_end_point = get_effective_end_point(end_point)
-                if effective_end_point and effective_end_point.startswith('/'):
-                    if not url.endswith('/'):
-                        child_url = url + effective_end_point
-                    else:
-                        child_url = url[:-1] + effective_end_point
-                else:
-                    child_url = effective_end_point
-                if child_url and not url_visited.get(child_url, False):
-                    print "parent: ", url, "    child: ", child_url
-                    threads.append(gevent.spawn(parent_and_run_child_urls, child_url, child_depth, max_depth))
-            else:
-                pass
-        if threads:
-            gevent.joinall(threads)
-    except HTTPError as e:
-        url_insert = urls.insert()\
-            .values(url=url, code=unicode(e.reason))
-        conn = engine.connect()
-        conn.execute(url_insert)
-        conn.close()
-    except URLError as e:
-        url_insert = urls.insert()\
-            .values(url=url, code=unicode(e.reason))
-        conn = engine.connect()
-        conn.execute(url_insert)
-        conn.close()
-    except Exception as e:
-        print e
+            db.insert_row("acronym", **{'category_id': category_id, 'name': name, 'value': value})
+            db.commit()
+        except Exception as e:
+            print e
+            db.rollback()
 
 
-@app.route("/")
-def new_dfs_based_crawling():
-    url = 'http://askme.com'
-    depth = 0
-    max_depth = 3
+def add_acronym_for_category(category, category_id, threads):
+    url = u'http://www.acronymslist.com/' + category.attrs['href']
+    opened_url = urlopen(url)
+    try:
+        page = opened_url.read()
+    except httplib.IncompleteRead, e:
+        page = e.partial
+        print "Point 3"
+    soup = BeautifulSoup(page, 'html.parser')
+    pages = soup.find_all('a', attrs={'class': 'page'})
+    for page in pages:
+        threads.append(gevent.spawn(add_acronym_for_page, page, category_id))
+
+
+def do(url):
+    opened_url = urlopen(url)
+    try:
+        page = opened_url.read()
+    except httplib.IncompleteRead, e:
+        page = e.partial
+        print "Point 2"
+    soup = BeautifulSoup(page, 'html.parser')
+    all_categories = soup.find_all('a', attrs={'class': None, 'target': None})
+    all_categories = all_categories[1:]
+    all_categories.pop()
     threads = list()
-    threads.append(gevent.spawn(parent_and_run_child_urls, url, depth, max_depth))
-    url_visited[url] = True
+    for category in all_categories:
+        sql = u'select last_insert_id() as id'
+        db = CrawlerDB()
+        db.begin()
+        try:
+            db.insert_row("category", **{'name': category.contents[0]})
+            result = db.execute_raw_sql(sql, dict())
+            category_id = result[0]['id']
+            db.commit()
+        except Exception as e:
+            print e
+            print "Point 1"
+            db.rollback()
+        add_acronym_for_category(category, category_id, threads)
     gevent.joinall(threads)
-    return "Hello World!"
+
+
+@crawl.route('/', methods=['POST'])
+def crawl_site_and_store_data():
+    data = json.loads(request.get_data())
+    do(data['url'])
+    return jsonify({"success": True})
+
+
+@crawl.route('/', methods=['GET'])
+def check():
+    return "true"
 
 
 if __name__ == "__main__":
-    app.debug = True
-    http_server = WSGIServer(('', 8000), app)
-    http_server.serve_forever()
+    url = 'http://acronymslist.com/'
+    do(url)
