@@ -6,5 +6,7 @@ pip install -r requirements.txt
 python manage.py shell
 
 from main import *
+
 url = 'http://acronymslist.com/'
+
 do(url=url)
